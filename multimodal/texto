@@ -1,0 +1,398 @@
+from transformers import pipeline
+from googletrans import Translator
+import numpy as np
+import torch
+import librosa
+import matplotlib.pyplot as plt
+from scipy.stats import pearsonr
+
+# --- Configuración ---
+audio_path = "Experiencia_1.wav"
+num_fragmentos = 16  # cantidad de fragmentos de texto a analizar (emociones)
+
+print("🚀 INICIANDO ANÁLISIS EMOCIONAL COMPLETO")
+print("="*60)
+
+# --- Transcripción de audio ---
+print("📝 Transcribiendo audio...")
+asr_model = pipeline(
+    "automatic-speech-recognition",
+    model="openai/whisper-small",
+    device=0 if torch.cuda.is_available() else -1
+)
+
+# Cargar audio
+y, sr = librosa.load(audio_path, sr=16000)
+duracion_segundos = librosa.get_duration(y=y, sr=sr)
+print(f"  ⏱️  Duración del audio: {duracion_segundos:.2f} segundos")
+
+# Lógica de transcripción
+if duracion_segundos > 30:
+    print(f"  ⚠️  Audio de {duracion_segundos:.1f}s > 30s, usando fragmentos...")
+    texto_completo = ""
+else:
+    print("  🔄 Transcribiendo todo el audio de una vez...")
+    result = asr_model({"array": y, "sampling_rate": sr})
+    texto_completo = result["text"]
+
+# Si llegamos aquí con audio largo O si la transcripción completa falló
+if duracion_segundos > 30 or not texto_completo or len(texto_completo.strip()) < 10:
+    if duracion_segundos > 30:
+        print("  📊 Usando fragmentos para audio largo...")
+    else:
+        print("  🔄 Transcripción completa falló, usando fragmentos...")
+    
+    max_chunk = 25
+    overlap = 3
+    texto_completo = ""
+    start = 0
+    fragmento_num = 1
+    
+    while start < duracion_segundos:
+        end = min(start + max_chunk, duracion_segundos)
+        print(f"    Transcribiendo fragmento {fragmento_num} ({start:.1f}s - {end:.1f}s)...")
+        
+        start_sample = int(start * sr)
+        end_sample = int(end * sr)
+        audio_chunk = y[start_sample:end_sample]
+        
+        if len(audio_chunk) == 0:
+            start = end - overlap if end < duracion_segundos else end
+            fragmento_num += 1
+            continue
+        
+        result = asr_model({"array": audio_chunk, "sampling_rate": sr})
+        frag_text = result["text"]
+        texto_completo += frag_text + " "
+        
+        start = end - overlap if end < duracion_segundos else end
+        fragmento_num += 1
+
+texto_completo = " ".join(texto_completo.split())
+
+# Función para eliminar duplicados
+def eliminar_duplicados(texto):
+    oraciones = texto.split('.')
+    oraciones_limpias = []
+    
+    for oracion in oraciones:
+        oracion = oracion.strip()
+        if not oracion:
+            continue
+            
+        es_duplicado = False
+        for oracion_existente in oraciones_limpias:
+            palabras_nueva = set(oracion.lower().split())
+            palabras_existente = set(oracion_existente.lower().split())
+            
+            if len(palabras_nueva) == 0:
+                continue
+                
+            coincidencias = len(palabras_nueva.intersection(palabras_existente))
+            porcentaje_coincidencia = coincidencias / len(palabras_nueva)
+            
+            if porcentaje_coincidencia > 0.8:
+                es_duplicado = True
+                break
+        
+        if not es_duplicado:
+            oraciones_limpias.append(oracion)
+    
+    return '. '.join(oraciones_limpias) + '.'
+
+# Limpiar duplicados
+texto_original = texto_completo
+texto_completo = eliminar_duplicados(texto_completo)
+duplicados_eliminados = len(texto_original.split()) - len(texto_completo.split())
+
+print(f"\n📄 TEXTO TRANSCRITO PROCESADO:")
+print(f"  📊 Caracteres: {len(texto_completo)} | Palabras: {len(texto_completo.split())}")
+print(f"  🧹 Palabras duplicadas eliminadas: {duplicados_eliminados}")
+
+# Traducir a inglés 
+print(f"\n🌐 Traduciendo a inglés...")
+translator = Translator()
+texto_en = translator.translate(texto_completo, src='es', dest='en').text
+
+# Dividir texto en fragmentos para emociones
+palabras = texto_en.split()
+fragmentos_texto_emociones = np.array_split(palabras, num_fragmentos)
+fragmentos_texto_emociones = [" ".join(f) for f in fragmentos_texto_emociones]
+
+print(f"  ✅ Traducido: {len(palabras)} palabras → {num_fragmentos} fragmentos")
+
+# Análisis de emociones
+print(f"\n📖 Analizando emociones por fragmento...")
+emotion_model = pipeline(
+    "text-classification",
+    model="pysentimiento/robertuito-base-uncased-emotion",
+    top_k=None
+)
+
+etiquetas = []
+scores_por_fragmento = []
+
+# Mapeo de emociones a español
+etiquetas_es = {
+    'fear': 'Miedo', 'nervousness': 'Nerviosismo', 'realization': 'Comprensión',
+    'confusion': 'Confusión', 'neutral': 'Neutral', 'sadness': 'Tristeza',
+    'approval': 'Aprobación', 'embarrassment': 'Vergüenza', 'curiosity': 'Curiosidad',
+    'caring': 'Cariño', 'annoyance': 'Molestia', 'disappointment': 'Decepción',
+    'gratitude': 'Gratitud', 'love': 'Amor', 'joy': 'Alegría',
+    'amusement': 'Diversión', 'excitement': 'Emoción', 'admiration': 'Admiración',
+    'grief': 'Dolor', 'optimism': 'Optimismo', 'surprise': 'Sorpresa',
+    'relief': 'Alivio', 'disapproval': 'Desaprobación', 'remorse': 'Remordimiento',
+    'pride': 'Orgullo', 'desire': 'Deseo', 'disgust': 'Disgusto', 'anger': 'Enojo'
+}
+
+for i, frag in enumerate(fragmentos_texto_emociones):
+    resultados = emotion_model(frag)
+
+    fragment_labels = []
+    fragment_scores = []
+
+    if isinstance(resultados, list) and len(resultados) > 0:
+        if isinstance(resultados[0], list):
+            resultados = resultados[0]
+        for r in resultados:
+            if isinstance(r, dict) and 'label' in r and 'score' in r:
+                fragment_labels.append(r['label'])
+                fragment_scores.append(r['score'])
+
+    if i == 0:
+        etiquetas = fragment_labels
+
+    scores_por_fragmento.append(fragment_scores)
+
+scores_por_fragmento = np.array(scores_por_fragmento)
+emociones_español = [etiquetas_es.get(e.lower(), e.capitalize()) for e in etiquetas]
+
+# ===============================
+# ANÁLISIS COMPLETO EN CONSOLA
+# ===============================
+
+print(f"\n" + "="*80)
+print(f"📋 REPORTE COMPLETO DE ANÁLISIS EMOCIONAL")
+print(f"="*80)
+
+print(f"🎵 ARCHIVO ANALIZADO: {audio_path}")
+print(f"⏱️  DURACIÓN: {duracion_segundos:.2f} segundos")
+print(f"📝 FRAGMENTOS ANALIZADOS: {num_fragmentos}")
+print(f"📄 TEXTO TRANSCRITO: {len(texto_completo)} caracteres")
+
+print(f"\n📖 TEXTO TRANSCRITO COMPLETO:")
+print(f"-" * 80)
+print(texto_completo)
+print(f"-" * 80)
+
+# === ANÁLISIS ESTADÍSTICO DE EMOCIONES ===
+print(f"\n📊 ANÁLISIS ESTADÍSTICO DE EMOCIONES:")
+print(f"-" * 60)
+
+# Calcular estadísticas para cada emoción
+estadisticas_emociones = []
+for i, emocion in enumerate(emociones_español):
+    scores = scores_por_fragmento[:, i]
+    promedio = np.mean(scores)
+    maximo = np.max(scores)
+    minimo = np.min(scores)
+    std = np.std(scores)
+    
+    estadisticas_emociones.append({
+        'emocion': emocion,
+        'promedio': promedio,
+        'maximo': maximo,
+        'minimo': minimo,
+        'std': std,
+        'scores': scores.tolist()
+    })
+
+# Ordenar por promedio (descendente)
+estadisticas_emociones.sort(key=lambda x: x['promedio'], reverse=True)
+
+print(f"{'EMOCIÓN':<15} {'PROMEDIO':<10} {'MÁXIMO':<10} {'MÍNIMO':<10} {'STD':<10}")
+print(f"-" * 60)
+for emo_data in estadisticas_emociones:
+    print(f"{emo_data['emocion']:<15} {emo_data['promedio']:<10.3f} {emo_data['maximo']:<10.3f} {emo_data['minimo']:<10.3f} {emo_data['std']:<10.3f}")
+
+# === EMOCIONES DOMINANTES ===
+print(f"\n🎯 EMOCIONES DOMINANTES:")
+print(f"-" * 40)
+
+# Top 5 emociones por promedio
+top_5_emociones = estadisticas_emociones[:5]
+print(f"📈 TOP 5 EMOCIONES POR PROMEDIO:")
+for i, emo_data in enumerate(top_5_emociones, 1):
+    print(f"  {i}. {emo_data['emocion']}: {emo_data['promedio']:.3f}")
+
+# Emoción dominante por fragmento
+print(f"\n📍 EMOCIÓN DOMINANTE POR FRAGMENTO:")
+for i in range(num_fragmentos):
+    max_idx = np.argmax(scores_por_fragmento[i])
+    emocion_dom = emociones_español[max_idx]
+    score_dom = scores_por_fragmento[i][max_idx]
+    print(f"  Fragmento {i+1:2d}: {emocion_dom:<15} (confianza: {score_dom:.3f})")
+
+# === ANÁLISIS DE VARIABILIDAD ===
+print(f"\n📊 ANÁLISIS DE VARIABILIDAD:")
+print(f"-" * 50)
+
+# Emociones más estables (menor desviación estándar)
+emociones_estables = sorted(estadisticas_emociones, key=lambda x: x['std'])[:5]
+print(f"🎯 TOP 5 EMOCIONES MÁS ESTABLES (menor variación):")
+for i, emo_data in enumerate(emociones_estables, 1):
+    print(f"  {i}. {emo_data['emocion']}: std={emo_data['std']:.3f}")
+
+# Emociones más variables
+emociones_variables = sorted(estadisticas_emociones, key=lambda x: x['std'], reverse=True)[:5]
+print(f"\n🎢 TOP 5 EMOCIONES MÁS VARIABLES:")
+for i, emo_data in enumerate(emociones_variables, 1):
+    print(f"  {i}. {emo_data['emocion']}: std={emo_data['std']:.3f}")
+
+# === ANÁLISIS DE PATRONES ===
+print(f"\n🔍 ANÁLISIS DE PATRONES:")
+print(f"-" * 50)
+
+# Evolución temporal de emociones principales
+print(f"📈 EVOLUCIÓN DE TOP 3 EMOCIONES:")
+for emo_data in estadisticas_emociones[:3]:
+    emocion = emo_data['emocion']
+    scores = emo_data['scores']
+    
+    print(f"\n  🎭 {emocion.upper()}:")
+    print(f"    Evolución: ", end="")
+    
+    # Crear mini-gráfico en texto
+    for i, score in enumerate(scores):
+        if score > 0.6:
+            print("█", end="")
+        elif score > 0.4:
+            print("▓", end="")
+        elif score > 0.2:
+            print("▒", end="")
+        elif score > 0.1:
+            print("░", end="")
+        else:
+            print("·", end="")
+        
+        if (i + 1) % 8 == 0:  # Nueva línea cada 8 fragmentos
+            print()
+            print("    " + " " * 10, end="")
+    
+    print(f"\n    Tendencia: ", end="")
+    # Analizar tendencia
+    inicio = np.mean(scores[:num_fragmentos//3])
+    final = np.mean(scores[-num_fragmentos//3:])
+    
+    if final > inicio + 0.1:
+        print("📈 CRECIENTE")
+    elif final < inicio - 0.1:
+        print("📉 DECRECIENTE")
+    else:
+        print("➡️ ESTABLE")
+
+# === CORRELACIONES ENTRE EMOCIONES ===
+print(f"\n🔗 CORRELACIONES ENTRE EMOCIONES:")
+print(f"-" * 50)
+
+# Calcular correlaciones entre las top 5 emociones
+correlaciones_importantes = []
+top_emociones_data = estadisticas_emociones[:5]
+
+for i in range(len(top_emociones_data)):
+    for j in range(i+1, len(top_emociones_data)):
+        emo1 = top_emociones_data[i]
+        emo2 = top_emociones_data[j]
+        
+        try:
+            correlacion, p_value = pearsonr(emo1['scores'], emo2['scores'])
+            if abs(correlacion) > 0.3:  # Solo mostrar correlaciones moderadas o fuertes
+                correlaciones_importantes.append({
+                    'emo1': emo1['emocion'],
+                    'emo2': emo2['emocion'],
+                    'correlacion': correlacion,
+                    'p_value': p_value
+                })
+        except:
+            pass
+
+# Ordenar por correlación absoluta
+correlaciones_importantes.sort(key=lambda x: abs(x['correlacion']), reverse=True)
+
+if correlaciones_importantes:
+    print(f"🎭 CORRELACIONES SIGNIFICATIVAS (|r| > 0.3):")
+    for corr in correlaciones_importantes:
+        tipo = "💚 POSITIVA" if corr['correlacion'] > 0 else "❤️ NEGATIVA"
+        significancia = "✅" if corr['p_value'] < 0.05 else "⚠️"
+        print(f"  {corr['emo1']} ↔ {corr['emo2']}: r={corr['correlacion']:.3f} | {tipo} | {significancia}")
+else:
+    print(f"  ❌ No se encontraron correlaciones significativas entre las top emociones")
+
+# === RESUMEN EJECUTIVO ===
+print(f"\n🎯 RESUMEN EJECUTIVO:")
+print(f"-" * 40)
+
+emocion_principal = estadisticas_emociones[0]
+emocion_secundaria = estadisticas_emociones[1]
+
+print(f"🏆 EMOCIÓN PRINCIPAL: {emocion_principal['emocion']} (promedio: {emocion_principal['promedio']:.3f})")
+print(f"🥈 EMOCIÓN SECUNDARIA: {emocion_secundaria['emocion']} (promedio: {emocion_secundaria['promedio']:.3f})")
+
+# Análisis de intensidad emocional general
+intensidad_promedio = np.mean([emo['promedio'] for emo in estadisticas_emociones if emo['emocion'] != 'Neutral'])
+neutralidad = next((emo['promedio'] for emo in estadisticas_emociones if emo['emocion'] == 'Neutral'), 0)
+
+print(f"📊 INTENSIDAD EMOCIONAL GENERAL: {intensidad_promedio:.3f}")
+print(f"⚖️  NIVEL DE NEUTRALIDAD: {neutralidad:.3f}")
+
+if neutralidad > 0.5:
+    print(f"💭 INTERPRETACIÓN: El contenido tiene alta neutralidad emocional")
+elif intensidad_promedio > 0.3:
+    print(f"🔥 INTERPRETACIÓN: El contenido es emocionalmente intenso")
+else:
+    print(f"😐 INTERPRETACIÓN: El contenido tiene emocionalidad moderada")
+
+# === GRAFICAR (versión simplificada) ===
+print(f"\n📊 Generando visualización...")
+
+# Colores para las emociones
+colores = {
+    'Miedo': '#4B0082', 'Nerviosismo': '#FF8C00', 'Comprensión': '#1E90FF',
+    'Confusión': '#DAA520', 'Neutral': '#808080', 'Tristeza': '#1E3A8A',
+    'Aprobación': '#32CD32', 'Vergüenza': '#FF69B4', 'Curiosidad': '#00CED1',
+    'Cariño': '#FF1493', 'Molestia': '#B22222', 'Decepción': '#800080',
+    'Gratitud': '#FFB347', 'Amor': '#FF4500', 'Alegría': '#FFD700',
+    'Diversión': '#FF6347', 'Emoción': '#FF69B4', 'Admiración': '#00FA9A',
+    'Dolor': '#8B0000', 'Optimismo': '#ADFF2F', 'Sorpresa': '#FF4500',
+    'Alivio': '#20B2AA', 'Desaprobación': '#A52A2A', 'Remordimiento': '#C71585',
+    'Orgullo': '#800000', 'Deseo': '#FF1493', 'Disgusto': '#556B2F', 'Enojo': '#DC143C'
+}
+
+plt.figure(figsize=(15, 8))
+
+# Preparar datos para gráfico
+segment_times = list(range(1, num_fragmentos + 1))
+segment_times_plot = [0] + segment_times
+
+# Mostrar solo top 8 emociones para evitar saturación
+top_8_emociones = estadisticas_emociones[:8]
+
+for emo_data in top_8_emociones:
+    emocion = emo_data['emocion']
+    scores = [0] + emo_data['scores']  # Agregar 0 al inicio como en el código original
+    color = colores.get(emocion, 'black')
+    
+    plt.plot(segment_times_plot, scores,
+             marker='o', label=emocion, color=color, linewidth=2, markersize=6)
+
+plt.xlabel("Fragmento de Texto", fontsize=12)
+plt.ylabel("Nivel de Confianza", fontsize=12)
+plt.ylim(0, 1)
+plt.title("Evolución de Emociones por Fragmento de Texto (Top 8)", fontsize=14, fontweight='bold')
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+print(f"\n✨ ANÁLISIS COMPLETADO EXITOSAMENTE!")
+print(f"="*80)

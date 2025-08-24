@@ -1,0 +1,11 @@
+soundfile
+numpy
+torch
+librosa
+matplotlib
+scipy
+scikit-learn
+pandas
+seaborn
+transformers
+googletrans==4.0.0-rc1

@@ -1,0 +1,1006 @@
+import soundfile as sf
+import numpy as np
+import torch
+import librosa
+import matplotlib.pyplot as plt
+from scipy import signal
+from scipy.stats import pearsonr, spearmanr
+from scipy.interpolate import interp1d
+from transformers import pipeline
+from googletrans import Translator
+import re
+import seaborn as sns
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from scipy.signal import savgol_filter
+import pandas as pd
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+
+class ImprovedUnifiedEmotionAnalyzer:
+    def __init__(self, audio_path, num_fragmentos=16):
+        """
+        Analizador unificado MEJORADO con normalización completa para comparativas complejas
+        """
+        self.audio_path = audio_path
+        self.num_fragmentos = num_fragmentos
+        self.audio = None
+        self.samplerate = 16000
+        self.duracion = 0
+        self.texto_completo = ""
+        
+        # Resultados normalizados
+        self.emociones_texto = {}
+        self.emociones_audio = {}
+        self.emociones_texto_normalizadas = {}
+        self.emociones_audio_normalizadas = {}
+        self.emociones_sincronizadas = {}
+        
+        self.fragmentos_texto = []
+        self.tiempos_segmentos = []
+        self.tiempos_texto = []
+        
+        # Modelos
+        self.asr_model = None
+        self.emotion_text_model = None
+        self.emotion_audio_model = None
+        self.translator = None
+        
+        # Normalizadores
+        self.scaler_texto = StandardScaler()
+        self.scaler_audio = StandardScaler()
+        self.minmax_scaler = MinMaxScaler()
+        
+        # === MAPEO COMPLETO Y MEJORADO DE EMOCIONES ===
+        self.etiquetas_es = {
+            'fear': 'Miedo', 'nervousness': 'Nerviosismo', 'realization': 'Comprensión',
+            'confusion': 'Confusión', 'neutral': 'Neutral', 'sadness': 'Tristeza',
+            'approval': 'Aprobación', 'embarrassment': 'Vergüenza', 'curiosity': 'Curiosidad',
+            'caring': 'Cariño', 'annoyance': 'Molestia', 'disappointment': 'Decepción',
+            'gratitude': 'Gratitud', 'love': 'Amor', 'joy': 'Alegría',
+            'amusement': 'Diversión', 'excitement': 'Emoción', 'admiration': 'Admiración',
+            'grief': 'Dolor', 'optimism': 'Optimismo', 'surprise': 'Sorpresa',
+            'relief': 'Alivio', 'disapproval': 'Desaprobación', 'remorse': 'Remordimiento',
+            'pride': 'Orgullo', 'desire': 'Deseo', 'disgust': 'Disgusto', 'anger': 'Enojo'
+        }
+        
+        # Mapeo mejorado con sinónimos y agrupaciones
+        self.mapeo_audio_comun = {
+            'angry': 'Enojo', 'anger': 'Enojo', 'mad': 'Enojo',
+            'sad': 'Tristeza', 'sadness': 'Tristeza', 'melancholy': 'Tristeza',
+            'happy': 'Alegría', 'joy': 'Alegría', 'happiness': 'Alegría',
+            'fearful': 'Miedo', 'fear': 'Miedo', 'afraid': 'Miedo',
+            'surprised': 'Sorpresa', 'surprise': 'Sorpresa',
+            'disgust': 'Disgusto', 'disgusted': 'Disgusto',
+            'calm': 'Neutral', 'neutral': 'Neutral', 'relaxed': 'Neutral'
+        }
+        
+        # Agrupaciones emocionales para análisis avanzado
+        self.grupos_emocionales = {
+            'Negativas': ['Tristeza', 'Miedo', 'Enojo', 'Disgusto', 'Decepción', 'Dolor', 'Vergüenza'],
+            'Positivas': ['Alegría', 'Amor', 'Admiración', 'Optimismo', 'Gratitud', 'Orgullo'],
+            'Neutrales': ['Neutral', 'Comprensión', 'Curiosidad', 'Aprobación'],
+            'Activación Alta': ['Enojo', 'Alegría', 'Miedo', 'Sorpresa', 'Emoción'],
+            'Activación Baja': ['Tristeza', 'Neutral', 'Alivio', 'Cariño']
+        }
+        
+        self.colores_emociones = {
+            'Miedo': '#4B0082', 'Nerviosismo': '#FF8C00', 'Comprensión': '#1E90FF',
+            'Confusión': '#DAA520', 'Neutral': '#808080', 'Tristeza': '#1E3A8A',
+            'Aprobación': '#32CD32', 'Vergüenza': '#FF69B4', 'Curiosidad': '#00CED1',
+            'Cariño': '#FF1493', 'Molestia': '#B22222', 'Decepción': '#800080',
+            'Gratitud': '#FFB347', 'Amor': '#FF4500', 'Alegría': '#FFD700',
+            'Diversión': '#FF6347', 'Emoción': '#FF69B4', 'Admiración': '#00FA9A',
+            'Dolor': '#8B0000', 'Optimismo': '#ADFF2F', 'Sorpresa': '#FF4500',
+            'Alivio': '#20B2AA', 'Desaprobación': '#A52A2A', 'Remordimiento': '#C71585',
+            'Orgullo': '#800000', 'Deseo': '#FF1493', 'Disgusto': '#556B2F', 'Enojo': '#DC143C'
+        }
+
+    def cargar_modelos(self):
+        """Cargar modelos optimizados"""
+        print("🔄 Cargando modelos mejorados...")
+        
+        print("  📝 Cargando Whisper...")
+        self.asr_model = pipeline(
+            "automatic-speech-recognition",
+            model="openai/whisper-small",
+            device=0 if torch.cuda.is_available() else -1
+        )
+        
+        print("  📖 Cargando modelo de emociones (RoBERTuito)...")
+        self.emotion_text_model = pipeline(
+            "text-classification",
+            model="pysentimiento/robertuito-base-uncased-emotion",
+            top_k=None
+        )
+        
+        print("  🎵 Cargando modelo de audio...")
+        try:
+            self.emotion_audio_model = pipeline(
+                "audio-classification", 
+                model="ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
+            )
+        except:
+            self.emotion_audio_model = pipeline(
+                "audio-classification", 
+                model="superb/wav2vec2-base-superb-er"
+            )
+        
+        print("  🌐 Cargando traductor...")
+        self.translator = Translator()
+        
+        print("✅ Modelos cargados con mejoras\n")
+
+    def cargar_audio(self):
+        """Cargar audio optimizado"""
+        print(f"🎵 Cargando: {self.audio_path}")
+        
+        self.audio, _ = librosa.load(self.audio_path, sr=self.samplerate)
+        self.duracion = librosa.get_duration(y=self.audio, sr=self.samplerate)
+        
+        print(f"  ✅ {self.duracion:.2f} segundos cargados\n")
+
+    def transcribir_con_timestamps(self):
+        """Transcripción mejorada con timestamps precisos"""
+        print("📝 Transcribiendo con sincronización temporal...")
+        
+        if self.duracion > 30:
+            print(f"  ⚠️  Audio largo ({self.duracion:.1f}s), usando fragmentos con timestamps...")
+            texto_completo = ""
+            self.tiempos_texto = []
+            
+            max_chunk = 25
+            overlap = 3
+            start = 0
+            fragmento_num = 1
+            
+            while start < self.duracion:
+                end = min(start + max_chunk, self.duracion)
+                print(f"    Transcribiendo fragmento {fragmento_num} ({start:.1f}s - {end:.1f}s)...")
+                
+                start_sample = int(start * self.samplerate)
+                end_sample = int(end * self.samplerate)
+                audio_chunk = self.audio[start_sample:end_sample]
+                
+                if len(audio_chunk) == 0:
+                    start = end - overlap if end < self.duracion else end
+                    fragmento_num += 1
+                    continue
+                
+                result = self.asr_model({"array": audio_chunk, "sampling_rate": self.samplerate})
+                frag_text = result["text"]
+                texto_completo += frag_text + " "
+                
+                # Guardar timestamp del centro del fragmento
+                self.tiempos_texto.append((start + end) / 2)
+                
+                start = end - overlap if end < self.duracion else end
+                fragmento_num += 1
+        else:
+            result = self.asr_model({"array": self.audio, "sampling_rate": self.samplerate})
+            texto_completo = result["text"]
+            self.tiempos_texto = [self.duracion / 2]  # Punto medio para audio corto
+        
+        self.texto_completo = self._eliminar_duplicados_mejorado(texto_completo)
+        
+        print(f"  ✅ Texto final: {len(self.texto_completo)} chars | {len(self.texto_completo.split())} words")
+        print(f"  📄 Texto: {self.texto_completo[:200]}...")
+        print()
+
+    def _eliminar_duplicados_mejorado(self, texto):
+        """Eliminación de duplicados mejorada con análisis semántico"""
+        oraciones = texto.split('.')
+        oraciones_limpias = []
+        
+        for oracion in oraciones:
+            oracion = oracion.strip()
+            if not oracion or len(oracion) < 5:
+                continue
+                
+            es_duplicado = False
+            for oracion_existente in oraciones_limpias:
+                # Análisis mejorado de similitud
+                palabras_nueva = set(oracion.lower().split())
+                palabras_existente = set(oracion_existente.lower().split())
+                
+                if len(palabras_nueva) == 0:
+                    continue
+                    
+                # Jaccard similarity
+                intersection = len(palabras_nueva.intersection(palabras_existente))
+                union = len(palabras_nueva.union(palabras_existente))
+                jaccard = intersection / union if union > 0 else 0
+                
+                # Overlap coefficient
+                overlap = intersection / len(palabras_nueva) if len(palabras_nueva) > 0 else 0
+                
+                if jaccard > 0.6 or overlap > 0.8:
+                    es_duplicado = True
+                    break
+            
+            if not es_duplicado:
+                oraciones_limpias.append(oracion)
+        
+        return '. '.join(oraciones_limpias) + '.'
+
+    def analizar_texto_normalizado(self):
+        """Análisis de texto con normalización avanzada"""
+        print("📖 Analizando texto con normalización...")
+        
+        # Traducir
+        print("  🌐 Traduciendo a inglés...")
+        texto_en = self.translator.translate(self.texto_completo, src='es', dest='en').text
+        
+        # Fragmentar con distribución temporal
+        palabras = texto_en.split()
+        fragmentos_array = np.array_split(palabras, self.num_fragmentos)
+        self.fragmentos_texto = [" ".join(f) for f in fragmentos_array]
+        
+        # Crear timestamps para fragmentos de texto
+        if not self.tiempos_texto or len(self.tiempos_texto) == 1:
+            # Distribuir uniformemente si no hay timestamps específicos
+            self.tiempos_texto = np.linspace(0, self.duracion, self.num_fragmentos)
+        else:
+            # Interpolar para obtener timestamps para cada fragmento
+            if len(self.tiempos_texto) != self.num_fragmentos:
+                x_original = np.linspace(0, self.duracion, len(self.tiempos_texto))
+                x_nuevo = np.linspace(0, self.duracion, self.num_fragmentos)
+                interpolador = interp1d(x_original, self.tiempos_texto, kind='linear', fill_value='extrapolate')
+                self.tiempos_texto = interpolador(x_nuevo)
+        
+        print(f"  ✅ {len(palabras)} palabras → {self.num_fragmentos} fragmentos")
+        
+        # Analizar cada fragmento
+        etiquetas = []
+        scores_por_fragmento = []
+        
+        for i, frag in enumerate(self.fragmentos_texto):
+            if len(frag.strip()) < 3:  # Skip fragmentos muy cortos
+                continue
+                
+            print(f"  Fragmento {i+1}: {frag[:50]}...")
+            
+            resultados = self.emotion_text_model(frag)
+            
+            fragment_labels = []
+            fragment_scores = []
+            
+            if isinstance(resultados, list) and len(resultados) > 0:
+                if isinstance(resultados[0], list):
+                    resultados = resultados[0]
+                    
+                for r in resultados:
+                    if isinstance(r, dict) and 'label' in r and 'score' in r:
+                        fragment_labels.append(r['label'])
+                        fragment_scores.append(r['score'])
+            
+            if i == 0:
+                etiquetas = fragment_labels
+            
+            # Asegurar que todos los fragmentos tengan la misma estructura
+            if len(fragment_scores) == len(etiquetas):
+                scores_por_fragmento.append(fragment_scores)
+            else:
+                # Rellenar con ceros si faltan emociones
+                scores_completos = []
+                for etiq in etiquetas:
+                    idx = fragment_labels.index(etiq) if etiq in fragment_labels else -1
+                    if idx >= 0:
+                        scores_completos.append(fragment_scores[idx])
+                    else:
+                        scores_completos.append(0.0)
+                scores_por_fragmento.append(scores_completos)
+        
+        # Convertir a matriz numpy para facilitar operaciones
+        scores_matriz = np.array(scores_por_fragmento)
+        
+        # Aplicar suavizado temporal (filtro Savitzky-Golay)
+        if scores_matriz.shape[0] > 5:  # Solo si hay suficientes puntos
+            window_length = min(5, scores_matriz.shape[0] if scores_matriz.shape[0] % 2 == 1 else scores_matriz.shape[0] - 1)
+            if window_length >= 3:
+                for i in range(scores_matriz.shape[1]):
+                    scores_matriz[:, i] = savgol_filter(scores_matriz[:, i], window_length, 2)
+        
+        # Guardar datos originales con conversión segura
+        self.emociones_texto = {}
+        for i, etiqueta in enumerate(etiquetas):
+            emocion_es = self.etiquetas_es.get(etiqueta.lower(), etiqueta.capitalize())
+            datos_columna = scores_matriz[:, i]
+            self.emociones_texto[emocion_es] = datos_columna.tolist() if hasattr(datos_columna, 'tolist') else list(datos_columna)
+        
+        # Normalizar datos
+        self._normalizar_emociones_texto()
+        
+        print(f"  ✅ {len(self.emociones_texto)} emociones detectadas y normalizadas")
+
+    def analizar_emociones_audio_sincronizado(self):
+        """Análisis de audio con sincronización temporal precisa"""
+        print("🎵 Analizando audio con sincronización...")
+        
+        # Crear segmentos temporales alineados con texto
+        self.tiempos_segmentos = []
+        resultados_audio = []
+        
+        # Usar los mismos timestamps que el texto para sincronización
+        duracion_fragmento = self.duracion / self.num_fragmentos
+        
+        for i in range(self.num_fragmentos):
+            start_time = i * duracion_fragmento
+            end_time = (i + 1) * duracion_fragmento
+            
+            if end_time > self.duracion:
+                end_time = self.duracion
+            
+            start_sample = int(start_time * self.samplerate)
+            end_sample = int(end_time * self.samplerate)
+            fragmento_audio = self.audio[start_sample:end_sample]
+            
+            if len(fragmento_audio) < self.samplerate * 0.2:  # Mínimo 0.2 segundos
+                continue
+                
+            try:
+                result = self.emotion_audio_model(fragmento_audio, sampling_rate=self.samplerate)
+                resultados_audio.append(result)
+                self.tiempos_segmentos.append((start_time + end_time) / 2)
+                print(f"  ✓ Fragmento {len(resultados_audio)}: {start_time:.1f}s - {end_time:.1f}s")
+            except Exception as e:
+                print(f"  ❌ Error en fragmento {i+1}: {e}")
+                # Agregar resultado vacío para mantener sincronización
+                resultados_audio.append([])
+                self.tiempos_segmentos.append((start_time + end_time) / 2)
+        
+        # Procesar resultados con normalización
+        if resultados_audio:
+            self._procesar_resultados_audio(resultados_audio)
+            self._normalizar_emociones_audio()
+        
+        print(f"  ✅ Audio: {len(self.emociones_audio)} emociones detectadas y normalizadas")
+
+    def _procesar_resultados_audio(self, resultados_audio):
+        """Procesar resultados de audio con mapeo mejorado"""
+        todas_emociones_audio = set()
+        
+        # Identificar todas las emociones presentes
+        for resultado in resultados_audio:
+            if resultado:  # Solo si no está vacío
+                for r in resultado:
+                    emo_comun = self.mapeo_audio_comun.get(r['label'], r['label'].capitalize())
+                    todas_emociones_audio.add(emo_comun)
+        
+        # Inicializar arrays
+        for emocion in todas_emociones_audio:
+            self.emociones_audio[emocion] = []
+        
+        # Procesar cada fragmento
+        for resultado in resultados_audio:
+            scores_fragmento = {emo: 0.0 for emo in todas_emociones_audio}
+            
+            if resultado:  # Solo si no está vacío
+                for r in resultado:
+                    emo_comun = self.mapeo_audio_comun.get(r['label'], r['label'].capitalize())
+                    if emo_comun in scores_fragmento:
+                        scores_fragmento[emo_comun] = r['score']
+            
+            # Agregar scores (incluyendo ceros para fragmentos con error)
+            for emo in todas_emociones_audio:
+                self.emociones_audio[emo].append(scores_fragmento[emo])
+
+    def _normalizar_emociones_texto(self):
+        """Normalización avanzada de emociones de texto"""
+        # Convertir a matriz
+        emociones_nombres = list(self.emociones_texto.keys())
+        datos_matriz = np.array([self.emociones_texto[emo] for emo in emociones_nombres]).T
+        
+        # Normalización Z-score (StandardScaler)
+        datos_normalizados_z = self.scaler_texto.fit_transform(datos_matriz)
+        
+        # Normalización Min-Max [0,1]
+        datos_normalizados_minmax = self.minmax_scaler.fit_transform(datos_matriz)
+        
+        # Guardar versiones normalizadas
+        self.emociones_texto_normalizadas = {}
+        for i, emocion in enumerate(emociones_nombres):
+            self.emociones_texto_normalizadas[emocion] = {
+                'original': self.emociones_texto[emocion],
+                'z_score': datos_normalizados_z[:, i].tolist() if hasattr(datos_normalizados_z[:, i], 'tolist') else list(datos_normalizados_z[:, i]),
+                'minmax': datos_normalizados_minmax[:, i].tolist() if hasattr(datos_normalizados_minmax[:, i], 'tolist') else list(datos_normalizados_minmax[:, i]),
+                'suavizado': self._aplicar_suavizado(self.emociones_texto[emocion])
+            }
+
+    def _normalizar_emociones_audio(self):
+        """Normalización avanzada de emociones de audio"""
+        if not self.emociones_audio:
+            return
+            
+        # Convertir a matriz
+        emociones_nombres = list(self.emociones_audio.keys())
+        datos_matriz = np.array([self.emociones_audio[emo] for emo in emociones_nombres]).T
+        
+        # Normalización Z-score
+        datos_normalizados_z = self.scaler_audio.fit_transform(datos_matriz)
+        
+        # Normalización Min-Max
+        scaler_audio_minmax = MinMaxScaler()
+        datos_normalizados_minmax = scaler_audio_minmax.fit_transform(datos_matriz)
+        
+        # Guardar versiones normalizadas
+        self.emociones_audio_normalizadas = {}
+        for i, emocion in enumerate(emociones_nombres):
+            self.emociones_audio_normalizadas[emocion] = {
+                'original': self.emociones_audio[emocion],
+                'z_score': datos_normalizados_z[:, i].tolist() if hasattr(datos_normalizados_z[:, i], 'tolist') else list(datos_normalizados_z[:, i]),
+                'minmax': datos_normalizados_minmax[:, i].tolist() if hasattr(datos_normalizados_minmax[:, i], 'tolist') else list(datos_normalizados_minmax[:, i]),
+                'suavizado': self._aplicar_suavizado(self.emociones_audio[emocion])
+            }
+
+    def _aplicar_suavizado(self, datos):
+        """Aplicar suavizado temporal a los datos"""
+        if len(datos) < 3:
+            return datos
+        
+        datos_array = np.array(datos)
+        window_length = min(5, len(datos) if len(datos) % 2 == 1 else len(datos) - 1)
+        
+        if window_length >= 3:
+            resultado = savgol_filter(datos_array, window_length, 2)
+            return resultado.tolist() if hasattr(resultado, 'tolist') else resultado
+        else:
+            return datos
+
+    def sincronizar_emociones(self):
+        """Sincronización temporal avanzada entre texto y audio"""
+        print("🔄 Sincronizando emociones texto-audio...")
+        
+        if not self.emociones_audio_normalizadas:
+            print("  ⚠️ No hay datos de audio para sincronizar")
+            return
+        
+        # Encontrar emociones comunes
+        emociones_texto_set = set(self.emociones_texto_normalizadas.keys())
+        emociones_audio_set = set(self.emociones_audio_normalizadas.keys())
+        emociones_comunes = emociones_texto_set & emociones_audio_set
+        
+        print(f"  📊 Emociones comunes encontradas: {len(emociones_comunes)}")
+        
+        self.emociones_sincronizadas = {}
+        
+        for emocion in emociones_comunes:
+            # Obtener datos normalizados
+            datos_texto = self.emociones_texto_normalizadas[emocion]['minmax']
+            datos_audio = self.emociones_audio_normalizadas[emocion]['minmax']
+            
+            # Interpolar si las longitudes son diferentes
+            if len(datos_texto) != len(datos_audio):
+                # Crear grids temporales
+                tiempo_texto = np.linspace(0, self.duracion, len(datos_texto))
+                tiempo_audio = np.linspace(0, self.duracion, len(datos_audio))
+                tiempo_comun = np.linspace(0, self.duracion, max(len(datos_texto), len(datos_audio)))
+                
+                # Interpolación
+                interpolador_texto = interp1d(tiempo_texto, datos_texto, kind='linear', fill_value='extrapolate')
+                interpolador_audio = interp1d(tiempo_audio, datos_audio, kind='linear', fill_value='extrapolate')
+                
+                datos_texto_interp = interpolador_texto(tiempo_comun)
+                datos_audio_interp = interpolador_audio(tiempo_comun)
+            else:
+                datos_texto_interp = datos_texto
+                datos_audio_interp = datos_audio
+                tiempo_comun = np.linspace(0, self.duracion, len(datos_texto))
+            
+            # Convertir a lista solo si es numpy array
+            tiempo_lista = tiempo_comun.tolist() if hasattr(tiempo_comun, 'tolist') else tiempo_comun
+            texto_lista = datos_texto_interp.tolist() if hasattr(datos_texto_interp, 'tolist') else datos_texto_interp
+            audio_lista = datos_audio_interp.tolist() if hasattr(datos_audio_interp, 'tolist') else datos_audio_interp
+            
+            self.emociones_sincronizadas[emocion] = {
+                'tiempo': tiempo_lista,
+                'texto': texto_lista,
+                'audio': audio_lista
+            }
+        
+        print(f"  ✅ {len(self.emociones_sincronizadas)} emociones sincronizadas")
+
+    def calcular_metricas_avanzadas(self):
+        """Calcular métricas avanzadas de comparación"""
+        print("📊 Calculando métricas avanzadas...")
+        
+        if not self.emociones_sincronizadas:
+            print("  ⚠️ Primero debe ejecutar sincronizar_emociones()")
+            return {}
+        
+        metricas = {}
+        
+        for emocion, datos in self.emociones_sincronizadas.items():
+            texto_datos = np.array(datos['texto'])
+            audio_datos = np.array(datos['audio'])
+            
+            # Correlaciones múltiples
+            correlacion_pearson, p_pearson = pearsonr(texto_datos, audio_datos)
+            correlacion_spearman, p_spearman = spearmanr(texto_datos, audio_datos)
+            
+            # Similitud coseno
+            similitud_coseno = cosine_similarity(
+                texto_datos.reshape(1, -1), 
+                audio_datos.reshape(1, -1)
+            )[0][0]
+            
+            # Error cuadrático medio
+            mse = np.mean((texto_datos - audio_datos) ** 2)
+            rmse = np.sqrt(mse)
+            
+            # Error absoluto medio
+            mae = np.mean(np.abs(texto_datos - audio_datos))
+            
+            # Coherencia espectral (para análisis de frecuencia)
+            try:
+                f, coherencia = signal.coherence(texto_datos, audio_datos, nperseg=min(8, len(texto_datos)//2))
+                coherencia_media = np.mean(coherencia)
+            except:
+                coherencia_media = 0
+            
+            metricas[emocion] = {
+                'correlacion_pearson': correlacion_pearson,
+                'p_valor_pearson': p_pearson,
+                'correlacion_spearman': correlacion_spearman,
+                'p_valor_spearman': p_spearman,
+                'similitud_coseno': similitud_coseno,
+                'mse': mse,
+                'rmse': rmse,
+                'mae': mae,
+                'coherencia_espectral': coherencia_media,
+                'significativa': p_pearson < 0.05
+            }
+        
+        print(f"  ✅ Métricas calculadas para {len(metricas)} emociones")
+        return metricas
+
+    def generar_reporte_avanzado(self):
+        """Generar reporte completo con análisis avanzado"""
+        print("\n" + "="*90)
+        print("📋 REPORTE AVANZADO DE ANÁLISIS EMOCIONAL CON NORMALIZACIÓN")
+        print("="*90)
+        
+        # Información básica
+        print(f"🎵 ARCHIVO: {self.audio_path}")
+        print(f"⏱️  DURACIÓN: {self.duracion:.2f} segundos")
+        print(f"📝 FRAGMENTOS: {self.num_fragmentos}")
+        print(f"📄 CARACTERES: {len(self.texto_completo)}")
+        
+        # Métricas avanzadas
+        metricas = self.calcular_metricas_avanzadas()
+        
+        if metricas:
+            print(f"\n📊 MÉTRICAS AVANZADAS DE CORRELACIÓN:")
+            print("-" * 80)
+            print(f"{'EMOCIÓN':<15} {'PEARSON':<8} {'SPEARMAN':<9} {'COSENO':<8} {'RMSE':<8} {'SIGNIF':<6}")
+            print("-" * 80)
+            
+            for emocion, metrica in sorted(metricas.items(), key=lambda x: abs(x[1]['correlacion_pearson']), reverse=True):
+                sig = "✅" if metrica['significativa'] else "❌"
+                print(f"{emocion:<15} {metrica['correlacion_pearson']:<8.3f} {metrica['correlacion_spearman']:<9.3f} "
+                      f"{metrica['similitud_coseno']:<8.3f} {metrica['rmse']:<8.3f} {sig}")
+        
+        # Análisis por grupos emocionales
+        self._analizar_grupos_emocionales()
+        
+        print("="*90)
+        print("✨ ANÁLISIS AVANZADO COMPLETADO")
+        print("="*90)
+
+    def _analizar_grupos_emocionales(self):
+        """Análisis avanzado por grupos emocionales"""
+        print(f"\n🎭 ANÁLISIS POR GRUPOS EMOCIONALES:")
+        print("-" * 60)
+        
+        for grupo, emociones_grupo in self.grupos_emocionales.items():
+            valores_texto = []
+            valores_audio = []
+            
+            for emocion in emociones_grupo:
+                if emocion in self.emociones_texto_normalizadas:
+                    valores_texto.extend(self.emociones_texto_normalizadas[emocion]['minmax'])
+                if emocion in self.emociones_audio_normalizadas:
+                    valores_audio.extend(self.emociones_audio_normalizadas[emocion]['minmax'])
+            
+            if valores_texto and valores_audio:
+                promedio_texto = np.mean(valores_texto)
+                promedio_audio = np.mean(valores_audio)
+                diferencia = abs(promedio_texto - promedio_audio)
+                
+                print(f"  {grupo}:")
+                print(f"    Texto: {promedio_texto:.3f} | Audio: {promedio_audio:.3f} | Diff: {diferencia:.3f}")
+
+    def detectar_patrones_temporales(self):
+        """Detectar patrones temporales en las emociones"""
+        print("🔍 Detectando patrones temporales...")
+        
+        patrones = {}
+        
+        for emocion in self.emociones_sincronizadas:
+            datos_texto = np.array(self.emociones_sincronizadas[emocion]['texto'])
+            datos_audio = np.array(self.emociones_sincronizadas[emocion]['audio'])
+            tiempo = np.array(self.emociones_sincronizadas[emocion]['tiempo'])
+            
+            # Detectar picos
+            from scipy.signal import find_peaks
+            
+            picos_texto, _ = find_peaks(datos_texto, height=0.6, distance=2)
+            picos_audio, _ = find_peaks(datos_audio, height=0.6, distance=2)
+            
+            # Calcular tendencias
+            tendencia_texto = np.polyfit(tiempo, datos_texto, 1)[0]
+            tendencia_audio = np.polyfit(tiempo, datos_audio, 1)[0]
+            
+            # Calcular variabilidad
+            variabilidad_texto = np.std(datos_texto)
+            variabilidad_audio = np.std(datos_audio)
+            
+            patrones[emocion] = {
+                'picos_texto': len(picos_texto),
+                'picos_audio': len(picos_audio),
+                'tendencia_texto': tendencia_texto,
+                'tendencia_audio': tendencia_audio,
+                'variabilidad_texto': variabilidad_texto,
+                'variabilidad_audio': variabilidad_audio,
+                'sincronizacion_picos': self._calcular_sincronizacion_picos(picos_texto, picos_audio, tiempo)
+            }
+        
+        return patrones
+
+    def _calcular_sincronizacion_picos(self, picos_texto, picos_audio, tiempo):
+        """Calcular qué tan sincronizados están los picos"""
+        if len(picos_texto) == 0 or len(picos_audio) == 0:
+            return 0
+        
+        # Convertir índices a tiempos
+        tiempos_picos_texto = tiempo[picos_texto]
+        tiempos_picos_audio = tiempo[picos_audio]
+        
+        # Calcular distancia mínima entre picos
+        distancias = []
+        for t_texto in tiempos_picos_texto:
+            dist_min = np.min(np.abs(tiempos_picos_audio - t_texto))
+            distancias.append(dist_min)
+        
+        # Sincronización basada en distancia promedio
+        distancia_promedio = np.mean(distancias)
+        sincronizacion = max(0, 1 - (distancia_promedio / (self.duracion / 4)))
+        
+        return sincronizacion
+
+    def clustering_emocional(self):
+        """Realizar clustering de estados emocionales"""
+        print("🧩 Realizando clustering emocional...")
+        
+        if not self.emociones_sincronizadas:
+            return None
+        
+        # Preparar datos para clustering
+        datos_combinados = []
+        etiquetas_tiempo = []
+        
+        for i in range(len(list(self.emociones_sincronizadas.values())[0]['tiempo'])):
+            fila = []
+            for emocion in self.emociones_sincronizadas:
+                fila.append(self.emociones_sincronizadas[emocion]['texto'][i])
+                fila.append(self.emociones_sincronizadas[emocion]['audio'][i])
+            datos_combinados.append(fila)
+            etiquetas_tiempo.append(list(self.emociones_sincronizadas.values())[0]['tiempo'][i])
+        
+        datos_combinados = np.array(datos_combinados)
+        
+        # Aplicar PCA para reducir dimensionalidad
+        pca = PCA(n_components=min(4, datos_combinados.shape[1]))
+        datos_pca = pca.fit_transform(datos_combinados)
+        
+        # K-means clustering
+        n_clusters = min(4, len(datos_combinados))
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        clusters = kmeans.fit_predict(datos_pca)
+        
+        # Analizar clusters
+        resultados_clustering = {
+            'datos_pca': datos_pca,
+            'clusters': clusters,
+            'centros': kmeans.cluster_centers_,
+            'etiquetas_tiempo': etiquetas_tiempo,
+            'varianza_explicada': pca.explained_variance_ratio_
+        }
+        
+        return resultados_clustering
+
+    def generar_visualizaciones_avanzadas(self):
+        """Generar visualizaciones avanzadas y comparativas"""
+        print("📊 Generando visualizaciones avanzadas...")
+        
+        # Configurar el estilo
+        plt.style.use('seaborn-v0_8' if 'seaborn-v0_8' in plt.style.available else 'default')
+        
+        # === FIGURA 1: COMPARACIÓN NORMALIZADA ===
+        fig1, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig1.suptitle('📊 ANÁLISIS COMPARATIVO NORMALIZADO', fontsize=16, fontweight='bold')
+        
+        # Subplot 1: Datos originales vs normalizados (Texto)
+        ax1 = axes[0, 0]
+        if self.emociones_texto_normalizadas:
+            # Mostrar top 3 emociones
+            emociones_top = sorted(self.emociones_texto.items(), 
+                                 key=lambda x: np.mean(x[1]), reverse=True)[:3]
+            
+            for emocion, _ in emociones_top:
+                if emocion in self.emociones_texto_normalizadas:
+                    tiempo = np.linspace(0, self.duracion, len(self.emociones_texto[emocion]))
+                    
+                    # Original
+                    ax1.plot(tiempo, self.emociones_texto[emocion], 
+                            label=f'{emocion} (Original)', linestyle='-', alpha=0.7)
+                    
+                    # Normalizado
+                    ax1.plot(tiempo, self.emociones_texto_normalizadas[emocion]['minmax'], 
+                            label=f'{emocion} (Norm)', linestyle='--', linewidth=2)
+        
+        ax1.set_title('📖 Texto: Original vs Normalizado')
+        ax1.set_xlabel('Tiempo (s)')
+        ax1.set_ylabel('Intensidad')
+        ax1.legend(fontsize=8)
+        ax1.grid(True, alpha=0.3)
+        
+        # Subplot 2: Datos originales vs normalizados (Audio)
+        ax2 = axes[0, 1]
+        if self.emociones_audio_normalizadas:
+            emociones_top_audio = sorted(self.emociones_audio.items(), 
+                                       key=lambda x: np.mean(x[1]), reverse=True)[:3]
+            
+            for emocion, _ in emociones_top_audio:
+                if emocion in self.emociones_audio_normalizadas:
+                    tiempo = np.linspace(0, self.duracion, len(self.emociones_audio[emocion]))
+                    
+                    # Original
+                    ax2.plot(tiempo, self.emociones_audio[emocion], 
+                            label=f'{emocion} (Original)', linestyle='-', alpha=0.7)
+                    
+                    # Normalizado
+                    ax2.plot(tiempo, self.emociones_audio_normalizadas[emocion]['minmax'], 
+                            label=f'{emocion} (Norm)', linestyle='--', linewidth=2)
+        
+        ax2.set_title('🎵 Audio: Original vs Normalizado')
+        ax2.set_xlabel('Tiempo (s)')
+        ax2.set_ylabel('Intensidad')
+        ax2.legend(fontsize=8)
+        ax2.grid(True, alpha=0.3)
+        
+        # Subplot 3: Correlaciones sincronizadas
+        ax3 = axes[1, 0]
+        if self.emociones_sincronizadas:
+            # Mostrar las 3 mejores correlaciones
+            metricas = self.calcular_metricas_avanzadas()
+            mejores_corr = sorted(metricas.items(), 
+                                key=lambda x: abs(x[1]['correlacion_pearson']), reverse=True)[:3]
+            
+            for emocion, metrica in mejores_corr:
+                if emocion in self.emociones_sincronizadas:
+                    tiempo = self.emociones_sincronizadas[emocion]['tiempo']
+                    texto_datos = self.emociones_sincronizadas[emocion]['texto']
+                    audio_datos = self.emociones_sincronizadas[emocion]['audio']
+                    
+                    ax3.plot(tiempo, texto_datos, label=f'{emocion} (T)', 
+                            linestyle='-', linewidth=2)
+                    ax3.plot(tiempo, audio_datos, label=f'{emocion} (A)', 
+                            linestyle='--', alpha=0.8)
+        
+        ax3.set_title('🔄 Emociones Sincronizadas (Mejores Correlaciones)')
+        ax3.set_xlabel('Tiempo (s)')
+        ax3.set_ylabel('Intensidad Normalizada')
+        ax3.legend(fontsize=8)
+        ax3.grid(True, alpha=0.3)
+        
+        # Subplot 4: Análisis de grupos emocionales
+        ax4 = axes[1, 1]
+        grupos_data = {}
+        for grupo, emociones_grupo in self.grupos_emocionales.items():
+            valores_texto = []
+            valores_audio = []
+            
+            for emocion in emociones_grupo:
+                if emocion in self.emociones_texto_normalizadas:
+                    valores_texto.extend(self.emociones_texto_normalizadas[emocion]['minmax'])
+                if emocion in self.emociones_audio_normalizadas:
+                    valores_audio.extend(self.emociones_audio_normalizadas[emocion]['minmax'])
+            
+            if valores_texto and valores_audio:
+                grupos_data[grupo] = {
+                    'texto': np.mean(valores_texto),
+                    'audio': np.mean(valores_audio)
+                }
+        
+        if grupos_data:
+            grupos_nombres = list(grupos_data.keys())
+            valores_texto_grupos = [grupos_data[g]['texto'] for g in grupos_nombres]
+            valores_audio_grupos = [grupos_data[g]['audio'] for g in grupos_nombres]
+            
+            x = np.arange(len(grupos_nombres))
+            width = 0.35
+            
+            ax4.bar(x - width/2, valores_texto_grupos, width, label='Texto', alpha=0.8)
+            ax4.bar(x + width/2, valores_audio_grupos, width, label='Audio', alpha=0.8)
+            
+            ax4.set_title('🎭 Análisis por Grupos Emocionales')
+            ax4.set_xlabel('Grupos')
+            ax4.set_ylabel('Intensidad Promedio')
+            ax4.set_xticks(x)
+            ax4.set_xticklabels(grupos_nombres, rotation=45, ha='right')
+            ax4.legend()
+            ax4.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # === FIGURA 2: HEATMAP DE CORRELACIONES AVANZADO ===
+        self._generar_heatmap_avanzado()
+        
+        # === FIGURA 3: ANÁLISIS TEMPORAL Y CLUSTERING ===
+        self._generar_analisis_temporal()
+
+    def _generar_heatmap_avanzado(self):
+        """Generar heatmap de correlaciones avanzado"""
+        if not self.emociones_sincronizadas:
+            return
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        
+        # Heatmap de correlaciones Pearson
+        emociones = list(self.emociones_sincronizadas.keys())
+        matriz_pearson = np.zeros((len(emociones), len(emociones)))
+        matriz_spearman = np.zeros((len(emociones), len(emociones)))
+        
+        for i, emo1 in enumerate(emociones):
+            for j, emo2 in enumerate(emociones):
+                datos1 = self.emociones_sincronizadas[emo1]['texto']
+                datos2 = self.emociones_sincronizadas[emo2]['audio']
+                
+                try:
+                    r_pearson, _ = pearsonr(datos1, datos2)
+                    r_spearman, _ = spearmanr(datos1, datos2)
+                    matriz_pearson[i, j] = r_pearson
+                    matriz_spearman[i, j] = r_spearman
+                except:
+                    matriz_pearson[i, j] = 0
+                    matriz_spearman[i, j] = 0
+        
+        try:
+            # Plot Pearson con seaborn si está disponible
+            sns.heatmap(matriz_pearson, 
+                       xticklabels=[f"A_{e}" for e in emociones],
+                       yticklabels=[f"T_{e}" for e in emociones],
+                       annot=True, cmap='RdBu_r', center=0, ax=ax1)
+            ax1.set_title('Correlaciones Pearson (Texto vs Audio)')
+            
+            # Plot Spearman
+            sns.heatmap(matriz_spearman,
+                       xticklabels=[f"A_{e}" for e in emociones],
+                       yticklabels=[f"T_{e}" for e in emociones],
+                       annot=True, cmap='RdBu_r', center=0, ax=ax2)
+            ax2.set_title('Correlaciones Spearman (Texto vs Audio)')
+        except:
+            # Fallback sin seaborn
+            im1 = ax1.imshow(matriz_pearson, cmap='RdBu', aspect='auto', vmin=-1, vmax=1)
+            ax1.set_title('Correlaciones Pearson (Texto vs Audio)')
+            ax1.set_xticks(range(len(emociones)))
+            ax1.set_yticks(range(len(emociones)))
+            ax1.set_xticklabels([f"A_{e}" for e in emociones], rotation=45)
+            ax1.set_yticklabels([f"T_{e}" for e in emociones])
+            
+            im2 = ax2.imshow(matriz_spearman, cmap='RdBu', aspect='auto', vmin=-1, vmax=1)
+            ax2.set_title('Correlaciones Spearman (Texto vs Audio)')
+            ax2.set_xticks(range(len(emociones)))
+            ax2.set_yticks(range(len(emociones)))
+            ax2.set_xticklabels([f"A_{e}" for e in emociones], rotation=45)
+            ax2.set_yticklabels([f"T_{e}" for e in emociones])
+            
+            plt.colorbar(im1, ax=ax1)
+            plt.colorbar(im2, ax=ax2)
+        
+        plt.tight_layout()
+        plt.show()
+
+    def _generar_analisis_temporal(self):
+        """Generar análisis temporal y clustering"""
+        # Detectar patrones
+        patrones = self.detectar_patrones_temporales()
+        
+        # Realizar clustering
+        clustering_results = self.clustering_emocional()
+        
+        if clustering_results is not None:
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+            
+            # Plot 1: PCA y clustering
+            scatter = ax1.scatter(clustering_results['datos_pca'][:, 0], 
+                                clustering_results['datos_pca'][:, 1],
+                                c=clustering_results['clusters'], 
+                                cmap='viridis', alpha=0.7)
+            ax1.set_xlabel(f'PC1 ({clustering_results["varianza_explicada"][0]:.2%})')
+            ax1.set_ylabel(f'PC2 ({clustering_results["varianza_explicada"][1]:.2%})')
+            ax1.set_title('🧩 Clustering de Estados Emocionales')
+            plt.colorbar(scatter, ax=ax1)
+            
+            # Plot 2: Timeline de clusters
+            tiempo = clustering_results['etiquetas_tiempo']
+            clusters = clustering_results['clusters']
+            
+            ax2.scatter(tiempo, clusters, c=clusters, cmap='viridis', alpha=0.7)
+            ax2.set_xlabel('Tiempo (s)')
+            ax2.set_ylabel('Cluster')
+            ax2.set_title('🕐 Evolución Temporal de Clusters')
+            ax2.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.show()
+
+    def ejecutar_analisis_completo(self):
+        """Ejecutar análisis completo mejorado"""
+        print("🚀 EJECUTANDO ANÁLISIS COMPLETO MEJORADO")
+        print("="*80)
+        
+        try:
+            # Cargar y procesar
+            self.cargar_modelos()
+            self.cargar_audio()
+            self.transcribir_con_timestamps()
+            self.analizar_texto_normalizado()
+            self.analizar_emociones_audio_sincronizado()
+            
+            # Sincronización y análisis avanzado
+            self.sincronizar_emociones()
+            
+            # Reportes y visualizaciones
+            self.generar_reporte_avanzado()
+            self.generar_visualizaciones_avanzadas()
+            
+            print("\n🎉 ¡ANÁLISIS COMPLETO MEJORADO FINALIZADO!")
+            
+            # Retornar resumen de normalización
+            return self._generar_resumen_normalizacion()
+            
+        except Exception as e:
+            print(f"❌ ERROR: {e}")
+            raise
+
+    def _generar_resumen_normalizacion(self):
+        """Generar resumen del estado de normalización"""
+        resumen = {
+            'datos_normalizados': True,
+            'sincronizacion_temporal': len(self.emociones_sincronizadas) > 0,
+            'emociones_texto_normalizadas': len(self.emociones_texto_normalizadas),
+            'emociones_audio_normalizadas': len(self.emociones_audio_normalizadas),
+            'emociones_sincronizadas': len(self.emociones_sincronizadas),
+            'metricas_disponibles': ['pearson', 'spearman', 'coseno', 'mse', 'rmse', 'mae'],
+            'normalizaciones_aplicadas': ['z_score', 'minmax', 'suavizado'],
+            'listo_para_comparativas_complejas': True
+        }
+        
+        print("\n📋 RESUMEN DE NORMALIZACIÓN:")
+        print("="*50)
+        for key, value in resumen.items():
+            print(f"  {key}: {value}")
+        
+        return resumen
+
+# === FUNCIÓN DE USO ===
+def main_mejorado():
+    """Función principal mejorada"""
+    audio_path = "Experiencia_1.wav"
+    num_fragmentos = 3
+    
+    print("🔥 USANDO ANALIZADOR MEJORADO CON NORMALIZACIÓN COMPLETA")
+    print("   (Datos normalizados y sincronizados para comparativas complejas)")
+    print("-" * 70)
+    
+    analizador = ImprovedUnifiedEmotionAnalyzer(audio_path, num_fragmentos)
+    resumen = analizador.ejecutar_analisis_completo()
+    
+    return analizador, resumen
+    
+
+if __name__ == "__main__":
+    analizador, resumen = main_mejorado()
