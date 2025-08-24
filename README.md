@@ -5,7 +5,7 @@ The system combines **speech-to-text transcription**, **emotion classification**
 
 ---
 
-## ✨ Features
+##  Features
 
 - **Multimodal approach**: integrates **speech (audio)** and **text**.
 - **Transformer-based models**:
@@ -22,7 +22,7 @@ The system combines **speech-to-text transcription**, **emotion classification**
 
 ---
 
-## 🔧 Requirements
+##  Requirements
 
 - Python 3.9+
 - (Optional) CUDA GPU for faster inference with Whisper / Wav2Vec2
